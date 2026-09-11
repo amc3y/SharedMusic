@@ -12,7 +12,7 @@ class MusicPlayer(context: Context){
     fun play(uri: Uri) {
         // Берём музыку
         val mediaItem = MediaItem.fromUri(uri)
-        // Звкидываем, как то что нужно воспроизвести
+        // Закидываем, как то что нужно воспроизвести
         player.setMediaItem(mediaItem)
         //Подготавливаем файл
         player.prepare()
@@ -20,7 +20,12 @@ class MusicPlayer(context: Context){
         player.play()
     }
 
+    fun stop(uri: Uri) {
+        player.stop()
+    }
+
     fun release() {
+
         player.release()
     }
 }

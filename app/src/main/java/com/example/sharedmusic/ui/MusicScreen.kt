@@ -1,6 +1,7 @@
 package com.example.sharedmusic.ui
 
 import android.net.Uri
+import android.service.autofill.OnClickAction
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -55,6 +56,17 @@ fun MusicScreen() {
             }
         ){
             Text("Послушать")
+        }
+
+        Button(
+            onClick = {
+                selectMusic?.let { uri ->
+                    musicPlayer.stop(uri)
+                }
+            }
+
+        ) {
+            Text("Стоп")
         }
     }
 }
