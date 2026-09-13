@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.SharedMusic" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Тёмная базовая тема: без белой вспышки при запуске приложения -->
+    <style name="Theme.SharedMusic" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0B0B0F</item>
+    </style>
 </resources>
