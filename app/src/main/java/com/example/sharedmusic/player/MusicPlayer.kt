@@ -20,7 +20,7 @@ class MusicPlayer(context: Context){
         player.play()
     }
 
-    fun stop(uri: Uri) {
+    fun stop() {
         player.stop()
     }
 

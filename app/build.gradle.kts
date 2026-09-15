@@ -59,4 +59,8 @@ dependencies {
 
     //
     implementation("androidx.media3:media3-exoplayer:1.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+
+    //
+
 }

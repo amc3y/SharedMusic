@@ -3,7 +3,8 @@ package com.example.sharedmusic
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import com.example.sharedmusic.ui.MusicScreen
+import com.example.sharedmusic.ui.AppNavigation
+import com.example.sharedmusic.ui.MainScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -11,7 +12,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
-            MusicScreen()
+            AppNavigation()
         }
     }
 }
