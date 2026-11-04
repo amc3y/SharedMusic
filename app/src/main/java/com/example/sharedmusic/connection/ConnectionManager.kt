@@ -55,7 +55,7 @@ class ConnectionManager(context: Context) {
 
     companion object {
         private const val DATABASE_URL =
-            "https://sharedmusic-38102-default-rtdb.europe-west1.firebasedatabase.app"
+            "https://shary-f5c42-default-rtdb.europe-west1.firebasedatabase.app/"
 
         private const val ROOM_CODE_LENGTH = 4
 

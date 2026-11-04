@@ -1,5 +1,6 @@
 package com.example.sharedmusic.ui
 
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -197,7 +198,7 @@ private fun LoginContent(
 
 // Содержимое профиля после входа: аватар, статистика, настройки, треки
 @Composable
-private fun ProfileContent(
+private fun ColumnScope.ProfileContent(
     nickname: String,
     userId: String,
     isDarkTheme: Boolean,
