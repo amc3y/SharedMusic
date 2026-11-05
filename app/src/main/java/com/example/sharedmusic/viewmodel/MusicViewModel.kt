@@ -6,12 +6,12 @@ import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import com.example.sharedmusic.connection.RemotePlaybackCommand
+import com.example.sharedmusic.data.SongLibrary
 import com.example.sharedmusic.model.Song
 import com.example.sharedmusic.player.MusicPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
-import java.util.UUID
 import kotlin.math.abs
 
 class MusicViewModel(
@@ -19,6 +19,7 @@ class MusicViewModel(
 ) : AndroidViewModel(application) {
 
     private val musicPlayer = MusicPlayer(application)
+    private val songLibrary = SongLibrary(application)
 
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val songs = _songs.asStateFlow()
@@ -38,6 +39,10 @@ class MusicViewModel(
     private var playbackPublisher:
             ((Song, Long, Boolean) -> Unit)? = null
 
+    /** Вызывается один раз, когда текущий трек закончился. */
+    private var onTrackEnded: ((Song) -> Unit)? = null
+    private var endEventConsumed = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val playbackUpdater = object : Runnable {
@@ -47,11 +52,18 @@ class MusicViewModel(
 
             val actualIsPlaying = musicPlayer.isPlaying
 
-            // Если песня сама закончилась, сообщаем об этом комнате.
-            if (_isPlaying.value && musicPlayer.hasEnded) {
-                _isPlaying.value = false
-                publishCurrentPlayback()
+            if (musicPlayer.hasEnded) {
+                if (_isPlaying.value || !endEventConsumed) {
+                    val ended = _currentSong.value
+                    _isPlaying.value = false
+                    if (!endEventConsumed && ended != null) {
+                        endEventConsumed = true
+                        publishCurrentPlayback(ended)
+                        onTrackEnded?.invoke(ended)
+                    }
+                }
             } else {
+                endEventConsumed = false
                 _isPlaying.value = actualIsPlaying
             }
 
@@ -60,6 +72,8 @@ class MusicViewModel(
     }
 
     init {
+        // Восстанавливаем сохранённую библиотеку
+        _songs.value = songLibrary.loadSongs()
         mainHandler.post(playbackUpdater)
     }
 
@@ -69,20 +83,50 @@ class MusicViewModel(
         playbackPublisher = publisher
     }
 
-    fun addSong(uri: Uri) {
-        val title = uri.lastPathSegment
-            ?.substringAfterLast('/')
-            ?: "Неизвестная песня"
-
-        val song = Song(
-            id = UUID.randomUUID().toString(),
-            title = title,
-            uri = uri
-        )
-
-        _songs.value = _songs.value + song
+    fun setOnTrackEnded(listener: ((Song) -> Unit)?) {
+        onTrackEnded = listener
     }
 
+    /**
+     * Добавляет песню из системного выбора файла.
+     * Файл копируется во внутреннее хранилище приложения.
+     */
+    fun addSong(uri: Uri) {
+        addSongs(listOf(uri))
+    }
+
+    /** Добавляет сразу несколько файлов в локальную библиотеку. */
+    fun addSongs(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+
+        val current = _songs.value.toMutableList()
+        var changed = false
+
+        for (uri in uris) {
+            try {
+                val song = songLibrary.importFromUri(uri)
+                if (current.any { it.id == song.id }) continue
+                val path = song.uri.path
+                if (path != null && current.any { it.uri.path == path }) {
+                    continue
+                }
+                current.add(song)
+                changed = true
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        if (changed) {
+            _songs.value = current.toList()
+            songLibrary.saveSongs(_songs.value)
+        }
+    }
+
+    /**
+     * Добавляет песню после скачивания из комнаты.
+     * Копирует в library/, чтобы файл не пропал при очистке room_tracks.
+     */
     fun addSongFromFile(
         file: File,
         title: String,
@@ -90,23 +134,53 @@ class MusicViewModel(
     ) {
         if (!file.exists() || !file.isFile) return
 
-        val finalId = songId ?: UUID.randomUUID().toString()
+        val finalId = songId ?: java.util.UUID.randomUUID().toString()
 
-        // Не добавляем один и тот же общий трек повторно.
         if (_songs.value.any { it.id == finalId }) return
 
-        val song = Song(
-            id = finalId,
-            title = title,
-            uri = Uri.fromFile(file),
-            isRemote = true
-        )
+        try {
+            val song = songLibrary.importFromFile(
+                source = file,
+                title = title,
+                songId = finalId,
+                isRemote = true
+            )
 
-        _songs.value = _songs.value + song
+            val updated = _songs.value + song
+            _songs.value = updated
+            songLibrary.saveSongs(updated)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun removeSong(song: Song) {
+        if (_currentSong.value?.id == song.id) {
+            musicPlayer.stop()
+            _currentSong.value = null
+            _isPlaying.value = false
+            _positionMs.value = 0L
+        }
+
+        val updated = _songs.value.filterNot { it.id == song.id }
+        _songs.value = updated
+        songLibrary.deleteSongFiles(song)
+        songLibrary.saveSongs(updated)
     }
 
     fun playSong(song: Song) {
+        // Файл мог быть удалён с диска
+        val path = song.uri.path
+        if (path != null) {
+            val f = File(path)
+            if (!f.exists()) {
+                removeSong(song)
+                return
+            }
+        }
+
         _currentSong.value = song
+        endEventConsumed = false
 
         musicPlayer.play(
             uri = song.uri,
@@ -117,6 +191,17 @@ class MusicViewModel(
         _positionMs.value = 0L
 
         publishCurrentPlayback()
+    }
+
+    /**
+     * Возвращает следующую песню после currentId в порядке списка,
+     * либо первую, если currentId не найден / это последняя (циклично).
+     */
+    fun nextSongAfter(currentId: String, playlist: List<Song>): Song? {
+        if (playlist.isEmpty()) return null
+        val index = playlist.indexOfFirst { it.id == currentId }
+        if (index < 0) return playlist.first()
+        return playlist[(index + 1) % playlist.size]
     }
 
     fun toggleMusic() {
@@ -162,10 +247,6 @@ class MusicViewModel(
         publishCurrentPlayback(song)
     }
 
-    /**
-     * Возвращает false, если соответствующей песни ещё нет локально.
-     * Удалённые команды не публикуются повторно.
-     */
     fun applyRemotePlayback(
         command: RemotePlaybackCommand
     ): Boolean {
@@ -180,13 +261,14 @@ class MusicViewModel(
 
         val previousSong = _currentSong.value
 
-        // Используем одинаковый ID общего трека на обоих устройствах.
         val song = if (candidate.id != command.trackId) {
             val updatedSong = candidate.copy(id = command.trackId)
 
-            _songs.value = _songs.value.map {
+            val mapped = _songs.value.map {
                 if (it.id == candidate.id) updatedSong else it
             }
+            _songs.value = mapped
+            songLibrary.saveSongs(mapped)
 
             updatedSong
         } else {
@@ -195,8 +277,6 @@ class MusicViewModel(
 
         _currentSong.value = song
 
-        // Учитываем время, прошедшее с получения команды,
-        // например пока скачивался файл.
         val elapsedMs = if (command.isPlaying) {
             (System.currentTimeMillis() - command.receivedAtMs)
                 .coerceAtLeast(0L)
@@ -236,7 +316,6 @@ class MusicViewModel(
             )
 
             if (command.isPlaying) {
-                // Не перематываем при каждом небольшом расхождении.
                 if (difference > 1_500L) {
                     musicPlayer.seekTo(targetPosition)
                 }
@@ -272,6 +351,7 @@ class MusicViewModel(
     override fun onCleared() {
         mainHandler.removeCallbacks(playbackUpdater)
         playbackPublisher = null
+        onTrackEnded = null
 
         musicPlayer.release()
 

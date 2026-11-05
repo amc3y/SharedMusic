@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.example.sharedmusic.model.Song
+import com.example.sharedmusic.transfer.TransferClient
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
@@ -21,22 +22,22 @@ import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
-
-data class RoomDevice(
-    val id: String,
-    val name: String
-)
 
 data class RoomTrack(
     val id: String,
     val title: String,
     val downloadUrl: String,
     val addedBy: String,
-    val fileName: String = ""
+    val fileName: String = "",
+    /** ID передачи в Supabase transfer_jobs (для confirm после скачивания) */
+    val transferId: String = "",
+    /** Путь объекта в Storage — запасной вариант удаления */
+    val objectPath: String = ""
 )
 
 data class RemotePlaybackCommand(
@@ -60,6 +61,10 @@ class ConnectionManager(context: Context) {
 
         private const val ROOM_CHARACTERS =
             "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+        const val MIN_CAPACITY = 2
+        const val MAX_CAPACITY = 20
+        const val DEFAULT_CAPACITY = 5
     }
 
     private val appContext = context.applicationContext
@@ -70,6 +75,7 @@ class ConnectionManager(context: Context) {
         .reference
 
     private val uploader = FileUploader()
+    private val transferClient = TransferClient()
     private val worker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val random = SecureRandom()
@@ -83,6 +89,26 @@ class ConnectionManager(context: Context) {
         private set
 
     var isBusy by mutableStateOf(false)
+        private set
+
+    /** Вместимость текущей комнаты (включая владельца). 0 = ещё не в комнате. */
+    var roomCapacity by mutableStateOf(0)
+        private set
+
+    /** Режим прав: OPEN или ADMIN_ONLY */
+    var permissionMode by mutableStateOf(RoomPermissionMode.OPEN)
+        private set
+
+    /** Роль текущего пользователя в комнате */
+    var myRole by mutableStateOf(RoomRole.MEMBER)
+        private set
+
+    /** uid текущего админа комнаты */
+    var adminUid by mutableStateOf<String?>(null)
+        private set
+
+    /** Есть ли пароль у комнаты (не сам пароль) */
+    var roomHasPassword by mutableStateOf(false)
         private set
 
     var progress by mutableStateOf(0f)
@@ -144,18 +170,30 @@ class ConnectionManager(context: Context) {
         return latestPlaybackRevision == command.revision
     }
 
-    fun createRoom() {
+    fun createRoom(
+        maxCapacity: Int = DEFAULT_CAPACITY,
+        password: String = "",
+        permissionMode: RoomPermissionMode = RoomPermissionMode.OPEN
+    ) {
         if (isBusy || currentRoomCode != null) return
 
+        val capacity = maxCapacity.coerceIn(MIN_CAPACITY, MAX_CAPACITY)
+
         isBusy = true
-        statusMessage = "Создание комнаты..."
+        statusMessage = "Создание комнаты (до $capacity чел.)..."
 
         ensureSignedIn { uid ->
-            findAvailableRoom(uid, 10)
+            findAvailableRoom(
+                uid = uid,
+                maxCapacity = capacity,
+                password = password,
+                permissionMode = permissionMode,
+                attemptsLeft = 10
+            )
         }
     }
 
-    fun joinRoom(inputCode: String) {
+    fun joinRoom(inputCode: String, password: String = "") {
         if (isBusy || currentRoomCode != null) return
 
         val code = inputCode.trim().uppercase(Locale.ROOT)
@@ -179,9 +217,55 @@ class ConnectionManager(context: Context) {
                     if (!snapshot.exists()) {
                         isBusy = false
                         statusMessage = "Комната $code не найдена."
-                    } else {
-                        registerDevice(code, uid)
+                        return@addOnSuccessListener
                     }
+
+                    val info = snapshot.child("info")
+                    val capacity = (
+                            info.child("maxCapacity").value as? Number
+                            )?.toInt() ?: DEFAULT_CAPACITY
+
+                    val storedHash = info.child("passwordHash")
+                        .getValue(String::class.java)
+                        .orEmpty()
+
+                    if (storedHash.isNotBlank()) {
+                        val given = hashPassword(password)
+                        if (given != storedHash) {
+                            isBusy = false
+                            statusMessage = "Неверный пароль комнаты."
+                            return@addOnSuccessListener
+                        }
+                    }
+
+                    val deviceCount = snapshot.child("devices")
+                        .childrenCount.toInt()
+
+                    if (
+                        !snapshot.child("devices").child(uid).exists() &&
+                        deviceCount >= capacity
+                    ) {
+                        isBusy = false
+                        statusMessage =
+                            "Комната $code заполнена ($deviceCount/$capacity)."
+                        return@addOnSuccessListener
+                    }
+
+                    val mode = RoomPermissionMode.fromString(
+                        info.child("permissionMode").getValue(String::class.java)
+                    )
+                    val admin = info.child("adminUid")
+                        .getValue(String::class.java)
+
+                    registerDevice(
+                        code = code,
+                        uid = uid,
+                        maxCapacity = capacity,
+                        role = RoomRole.MEMBER,
+                        permissionMode = mode,
+                        adminUidValue = admin,
+                        hasPassword = storedHash.isNotBlank()
+                    )
                 }
                 .addOnFailureListener { error ->
                     isBusy = false
@@ -193,6 +277,29 @@ class ConnectionManager(context: Context) {
 
     // Вызывается, когда пользователь локально запускает,
     // останавливает или перематывает песню.
+    /** Можно ли управлять плеером (play/pause/seek) */
+    fun canControlPlayback(): Boolean {
+        if (currentRoomCode == null) return false
+        return when (permissionMode) {
+            RoomPermissionMode.OPEN -> true
+            RoomPermissionMode.ADMIN_ONLY -> myRole.canModerate()
+        }
+    }
+
+    /** Можно ли отправлять музыку в комнату */
+    fun canShareMusic(): Boolean {
+        if (currentRoomCode == null) return false
+        return when (permissionMode) {
+            RoomPermissionMode.OPEN -> true
+            RoomPermissionMode.ADMIN_ONLY -> myRole.canModerate()
+        }
+    }
+
+    /** Только полный админ может назначать младших */
+    fun canManageRoles(): Boolean {
+        return currentRoomCode != null && myRole == RoomRole.ADMIN
+    }
+
     fun publishPlaybackState(
         song: Song,
         positionMs: Long,
@@ -200,6 +307,11 @@ class ConnectionManager(context: Context) {
     ) {
         val uid = auth.currentUser?.uid ?: return
         val roomCode = currentRoomCode ?: return
+
+        if (!canControlPlayback()) {
+            statusMessage = "Нет прав на управление музыкой (только админы)."
+            return
+        }
 
         writePlaybackState(
             roomCode = roomCode,
@@ -219,6 +331,7 @@ class ConnectionManager(context: Context) {
         val uid = auth.currentUser?.uid ?: return
         val roomCode = currentRoomCode ?: return
 
+        if (!canControlPlayback()) return
         if (latestPlaybackAuthor != uid) return
 
         writePlaybackState(
@@ -274,12 +387,23 @@ class ConnectionManager(context: Context) {
             return
         }
 
+        if (!canShareMusic()) {
+            statusMessage = "Нет прав на отправку музыки (только админы)."
+            return
+        }
+
         if (isBusy) return
 
         isBusy = true
         progress = 0f
         progressText = "Подготовка файла..."
         statusMessage = "Отправка песни..."
+
+        // Список uid слушателей на момент отправки (без отправителя)
+        val recipientUids = connectedDevices
+            .map { it.id }
+            .filter { it != uid }
+            .distinct()
 
         worker.execute {
             var temporaryFile: File? = null
@@ -289,20 +413,50 @@ class ConnectionManager(context: Context) {
                 temporaryFile = prepared.first
                 val fileName = prepared.second
 
-                val downloadUrl = uploader.upload(
+                val uploadResult = uploader.upload(
                     file = temporaryFile,
                     remoteFileName = fileName
                 ) { uploaded, total ->
                     reportProgress("Загрузка", uploaded, total)
                 }
 
+                // Регистрируем передачу на сервере (для автоудаления)
+                var transferId = ""
+                try {
+                    mainHandler.post {
+                        progressText = "Регистрация передачи..."
+                    }
+                    val reg = transferClient.register(
+                        roomCode = roomCode,
+                        objectPath = uploadResult.objectPath,
+                        downloadUrl = uploadResult.downloadUrl,
+                        fileName = uploadResult.fileName,
+                        songTitle = song.title,
+                        senderUid = uid,
+                        expectedRecipients = recipientUids,
+                        ttlMinutes = 10
+                    )
+                    transferId = reg.transferId
+                } catch (e: Exception) {
+                    // Файл уже в Storage — всё равно публикуем в комнату,
+                    // cleanup по таймауту подстрахует, если register упал.
+                    mainHandler.post {
+                        statusMessage =
+                            "Файл загружен, но учёт передачи: " +
+                                    (e.message ?: "ошибка")
+                    }
+                }
+
                 val data = mapOf(
                     "songId" to song.id,
                     "title" to song.title,
-                    "downloadUrl" to downloadUrl,
+                    "downloadUrl" to uploadResult.downloadUrl,
                     "addedBy" to uid,
-                    "fileName" to fileName,
-                    "addedAt" to System.currentTimeMillis()
+                    "fileName" to uploadResult.fileName,
+                    "addedAt" to System.currentTimeMillis(),
+                    "transferId" to transferId,
+                    "objectPath" to uploadResult.objectPath,
+                    "order" to roomTracks.size
                 )
 
                 database.child("rooms")
@@ -314,7 +468,12 @@ class ConnectionManager(context: Context) {
                         isBusy = false
                         progress = 1f
                         progressText = ""
-                        statusMessage = "Песня отправлена в комнату."
+                        val extra = if (recipientUids.isEmpty()) {
+                            " (получателей пока нет — файл удалится через 10 мин)"
+                        } else {
+                            " → ${recipientUids.size} слушател(ей)"
+                        }
+                        statusMessage = "Песня отправлена$extra."
                     }
                     .addOnFailureListener { error ->
                         isBusy = false
@@ -332,6 +491,268 @@ class ConnectionManager(context: Context) {
                 }
             } finally {
                 temporaryFile?.delete()
+            }
+        }
+    }
+
+
+    /**
+     * Отправляет несколько песен в комнату по очереди.
+     * @param onFinished вызывается на main thread когда всё готово или при ошибке.
+     */
+    fun shareSongs(
+        songs: List<Song>,
+        onFinished: ((Boolean, String) -> Unit)? = null
+    ) {
+        if (songs.isEmpty()) {
+            onFinished?.invoke(true, "Нечего отправлять.")
+            return
+        }
+        if (!canShareMusic()) {
+            val msg = "Нет прав на отправку музыки (только админы)."
+            statusMessage = msg
+            onFinished?.invoke(false, msg)
+            return
+        }
+        if (isBusy) {
+            onFinished?.invoke(false, "Идёт другая операция.")
+            return
+        }
+
+        val roomCode = currentRoomCode
+        val uid = auth.currentUser?.uid
+        if (roomCode == null || uid == null) {
+            val msg = "Сначала войдите в комнату."
+            statusMessage = msg
+            onFinished?.invoke(false, msg)
+            return
+        }
+
+        isBusy = true
+        statusMessage = "Отправка ${songs.size} песен..."
+
+        worker.execute {
+            var successCount = 0
+            var lastError: String? = null
+            val baseOrder = roomTracks.size
+
+            songs.forEachIndexed { index, song ->
+                var temporaryFile: File? = null
+                try {
+                    mainHandler.post {
+                        progress = 0f
+                        progressText = "Песня ${index + 1}/${songs.size}: подготовка"
+                        statusMessage = "Отправка ${index + 1}/${songs.size}..."
+                    }
+
+                    val prepared = prepareSongFile(song)
+                    temporaryFile = prepared.first
+                    val fileName = prepared.second
+
+                    val uploadResult = uploader.upload(
+                        file = temporaryFile,
+                        remoteFileName = fileName
+                    ) { uploaded, total ->
+                        reportProgress(
+                            "Загрузка ${index + 1}/${songs.size}",
+                            uploaded,
+                            total
+                        )
+                    }
+
+                    val recipientUids = connectedDevices
+                        .map { it.id }
+                        .filter { it != uid }
+                        .distinct()
+
+                    var transferId = ""
+                    try {
+                        val reg = transferClient.register(
+                            roomCode = roomCode,
+                            objectPath = uploadResult.objectPath,
+                            downloadUrl = uploadResult.downloadUrl,
+                            fileName = uploadResult.fileName,
+                            songTitle = song.title,
+                            senderUid = uid,
+                            expectedRecipients = recipientUids,
+                            ttlMinutes = 10
+                        )
+                        transferId = reg.transferId
+                    } catch (_: Exception) {
+                    }
+
+                    val data = mapOf(
+                        "songId" to song.id,
+                        "title" to song.title,
+                        "downloadUrl" to uploadResult.downloadUrl,
+                        "addedBy" to uid,
+                        "fileName" to uploadResult.fileName,
+                        "addedAt" to System.currentTimeMillis(),
+                        "transferId" to transferId,
+                        "objectPath" to uploadResult.objectPath,
+                        "order" to (baseOrder + index)
+                    )
+
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var writeOk = false
+                    var writeError: String? = null
+
+                    database.child("rooms")
+                        .child(roomCode)
+                        .child("tracks")
+                        .child(firebaseKey(song.id))
+                        .setValue(data)
+                        .addOnSuccessListener {
+                            writeOk = true
+                            latch.countDown()
+                        }
+                        .addOnFailureListener { error ->
+                            writeError = error.message
+                            latch.countDown()
+                        }
+
+                    latch.await()
+                    if (writeOk) {
+                        successCount++
+                    } else {
+                        lastError = writeError ?: "ошибка записи"
+                    }
+                } catch (e: Exception) {
+                    lastError = e.message ?: "ошибка"
+                } finally {
+                    temporaryFile?.delete()
+                }
+            }
+
+            mainHandler.post {
+                isBusy = false
+                progress = 1f
+                progressText = ""
+                val msg = if (successCount == songs.size) {
+                    "Отправлено песен: $successCount."
+                } else {
+                    "Отправлено $successCount из ${songs.size}." +
+                            (lastError?.let { " Ошибка: $it" } ?: "")
+                }
+                statusMessage = msg
+                onFinished?.invoke(successCount > 0, msg)
+            }
+        }
+    }
+
+    /**
+     * Треки комнаты, которых ещё нет в локальной библиотеке.
+     */
+    fun missingRoomTracks(localSongs: List<Song>): List<RoomTrack> {
+        return roomTracks.filter { track ->
+            localSongs.none { local ->
+                local.id == track.id ||
+                        local.title.trim().equals(
+                            track.title.trim(),
+                            ignoreCase = true
+                        )
+            }
+        }
+    }
+
+    fun hasAllRoomTracks(localSongs: List<Song>): Boolean {
+        if (roomTracks.isEmpty()) return true
+        return missingRoomTracks(localSongs).isEmpty()
+    }
+
+    /**
+     * Скачивает все недостающие треки комнаты по очереди.
+     */
+    fun downloadMissingTracks(
+        localSongs: List<Song>,
+        onEachReady: (File, RoomTrack) -> Unit,
+        onFinished: (Int, Int) -> Unit
+    ) {
+        val missing = missingRoomTracks(localSongs)
+        if (missing.isEmpty()) {
+            onFinished(0, 0)
+            return
+        }
+        if (isBusy) return
+
+        isBusy = true
+        statusMessage = "Скачивание библиотеки комнаты..."
+
+        worker.execute {
+            var ok = 0
+            for ((index, track) in missing.withIndex()) {
+                try {
+                    mainHandler.post {
+                        progress = 0f
+                        progressText =
+                            "Скачивание ${index + 1}/${missing.size}: ${track.title}"
+                        statusMessage =
+                            "Скачивание ${index + 1}/${missing.size}..."
+                    }
+
+                    val directory = File(appContext.filesDir, "room_tracks")
+                    if (!directory.exists()) directory.mkdirs()
+
+                    val rawTitle = safeFilePart(track.title)
+                    val baseTitle = rawTitle
+                        .substringBeforeLast('.', rawTitle)
+                        .ifBlank { "track" }
+                    val extension = getExtension(track.fileName)
+                    var destination = File(directory, "$baseTitle$extension")
+                    var n = 2
+                    while (destination.exists()) {
+                        destination = File(
+                            directory,
+                            "$baseTitle ($n)$extension"
+                        )
+                        n++
+                    }
+
+                    val downloaded = uploader.download(
+                        downloadUrl = track.downloadUrl,
+                        destinationFile = destination
+                    ) { d, t ->
+                        reportProgress(
+                            "Скачивание ${index + 1}/${missing.size}",
+                            d,
+                            t
+                        )
+                    }
+
+                    // confirm transfer if possible
+                    val transferId = track.transferId
+                    val objectPath = track.objectPath
+                    val myUid = auth.currentUser?.uid
+                    if (myUid != null) {
+                        try {
+                            if (transferId.isNotBlank()) {
+                                transferClient.confirm(transferId, myUid)
+                            } else if (objectPath.isNotBlank()) {
+                                transferClient.deleteByPath(objectPath)
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    ok++
+                    mainHandler.post {
+                        onEachReady(downloaded, track)
+                    }
+                } catch (e: Exception) {
+                    mainHandler.post {
+                        statusMessage =
+                            "Ошибка «${track.title}»: ${e.message}"
+                    }
+                }
+            }
+
+            mainHandler.post {
+                isBusy = false
+                progressText = ""
+                progress = 1f
+                statusMessage =
+                    "Скачано $ok из ${missing.size} треков комнаты."
+                onFinished(ok, missing.size)
             }
         }
     }
@@ -394,12 +815,60 @@ class ConnectionManager(context: Context) {
                     reportProgress("Скачивание", downloaded, total)
                 }
 
+                // Подтверждаем скачивание / удаляем файл с сервера
+                val transferId = track.transferId
+                val objectPath = track.objectPath
+                val myUid = auth.currentUser?.uid
+                var serverNote = ""
+
+                if (myUid != null) {
+                    try {
+                        if (transferId.isNotBlank()) {
+                            val confirm = transferClient.confirm(
+                                transferId = transferId,
+                                recipientUid = myUid
+                            )
+                            serverNote = if (confirm.deleted) {
+                                " Файл удалён с сервера."
+                            } else {
+                                " Подтверждено ${confirm.confirmedCount}/" +
+                                        "${confirm.expectedCount}."
+                            }
+                        } else if (objectPath.isNotBlank()) {
+                            // register не сработал — удаляем по пути
+                            transferClient.deleteByPath(objectPath)
+                            serverNote = " Файл удалён с сервера (по пути)."
+                        } else {
+                            serverNote =
+                                " (нет transferId — файл удалится по таймеру ~10 мин)"
+                        }
+                    } catch (e: Exception) {
+                        // Пробуем запасной путь
+                        try {
+                            if (objectPath.isNotBlank()) {
+                                transferClient.deleteByPath(
+                                    objectPath = objectPath,
+                                    transferId = transferId.ifBlank { null }
+                                )
+                                serverNote =
+                                    " Файл удалён с сервера (запасной путь)."
+                            } else {
+                                serverNote =
+                                    " Confirm ошибка: ${e.message}"
+                            }
+                        } catch (e2: Exception) {
+                            serverNote =
+                                " Не удалось удалить на сервере: ${e2.message}"
+                        }
+                    }
+                }
+
                 mainHandler.post {
                     try {
                         onSongReady(downloadedFile)
                         progress = 1f
                         progressText = ""
-                        statusMessage = "Песня скачана."
+                        statusMessage = "Песня скачана.$serverNote"
                     } catch (e: Exception) {
                         statusMessage =
                             "Файл скачан, но не добавлен: ${e.message}"
@@ -422,10 +891,17 @@ class ConnectionManager(context: Context) {
     fun leaveRoom() {
         val code = currentRoomCode
         val uid = auth.currentUser?.uid
+        val wasAdmin = myRole == RoomRole.ADMIN
+        val devicesSnapshot = connectedDevices.toList()
 
         removeRoomListeners()
 
         currentRoomCode = null
+        roomCapacity = 0
+        permissionMode = RoomPermissionMode.OPEN
+        myRole = RoomRole.MEMBER
+        adminUid = null
+        roomHasPassword = false
         connectedDevices.clear()
         roomTracks.clear()
         progress = 0f
@@ -435,17 +911,127 @@ class ConnectionManager(context: Context) {
         latestPlaybackRevision = null
 
         if (code != null && uid != null) {
-            val deviceReference = database
-                .child("rooms")
-                .child(code)
-                .child("devices")
-                .child(uid)
+            val roomRef = database.child("rooms").child(code)
+            val deviceReference = roomRef.child("devices").child(uid)
 
             deviceReference.onDisconnect().cancel()
-            deviceReference.removeValue()
+
+            if (wasAdmin) {
+                transferAdminOnLeave(
+                    roomRef = roomRef,
+                    leavingUid = uid,
+                    devices = devicesSnapshot
+                ) {
+                    deviceReference.removeValue()
+                }
+            } else {
+                deviceReference.removeValue()
+            }
         }
 
         statusMessage = "Вы вышли из комнаты."
+    }
+
+    /**
+     * Админ назначает участника младшим админом (модератором).
+     */
+    fun promoteToModerator(targetUid: String) {
+        val code = currentRoomCode ?: return
+        val uid = auth.currentUser?.uid ?: return
+
+        if (!canManageRoles()) {
+            statusMessage = "Только админ может назначать младших админов."
+            return
+        }
+        if (targetUid == uid) return
+
+        val device = connectedDevices.find { it.id == targetUid }
+        if (device == null) {
+            statusMessage = "Участник не найден."
+            return
+        }
+        if (device.role == RoomRole.ADMIN) {
+            statusMessage = "Нельзя изменить роль админа."
+            return
+        }
+
+        database.child("rooms")
+            .child(code)
+            .child("devices")
+            .child(targetUid)
+            .child("role")
+            .setValue(RoomRole.MODERATOR.name)
+            .addOnSuccessListener {
+                statusMessage = "${device.name} теперь младший админ."
+            }
+            .addOnFailureListener { error ->
+                statusMessage = "Не удалось назначить: ${error.message}"
+            }
+    }
+
+    /**
+     * Админ снимает права младшего админа.
+     */
+    fun demoteToMember(targetUid: String) {
+        val code = currentRoomCode ?: return
+
+        if (!canManageRoles()) {
+            statusMessage = "Только админ может менять роли."
+            return
+        }
+
+        val device = connectedDevices.find { it.id == targetUid }
+        if (device == null || device.role != RoomRole.MODERATOR) {
+            statusMessage = "Это не младший админ."
+            return
+        }
+
+        database.child("rooms")
+            .child(code)
+            .child("devices")
+            .child(targetUid)
+            .child("role")
+            .setValue(RoomRole.MEMBER.name)
+            .addOnSuccessListener {
+                statusMessage = "${device.name}: роль участника."
+            }
+            .addOnFailureListener { error ->
+                statusMessage = "Не удалось снять роль: ${error.message}"
+            }
+    }
+
+    private fun transferAdminOnLeave(
+        roomRef: DatabaseReference,
+        leavingUid: String,
+        devices: List<RoomDevice>,
+        onDone: () -> Unit
+    ) {
+        val candidatesMods = devices.filter {
+            it.id != leavingUid && it.role == RoomRole.MODERATOR
+        }
+        val candidatesAny = devices.filter { it.id != leavingUid }
+
+        val successor = when {
+            candidatesMods.isNotEmpty() ->
+                candidatesMods[random.nextInt(candidatesMods.size)]
+            candidatesAny.isNotEmpty() ->
+                candidatesAny[random.nextInt(candidatesAny.size)]
+            else -> null
+        }
+
+        if (successor == null) {
+            // Комната пустеет — можно удалить комнату целиком
+            roomRef.removeValue().addOnCompleteListener { onDone() }
+            return
+        }
+
+        val updates = hashMapOf<String, Any>(
+            "info/adminUid" to successor.id,
+            "devices/${successor.id}/role" to RoomRole.ADMIN.name
+        )
+
+        roomRef.updateChildren(updates)
+            .addOnCompleteListener { onDone() }
     }
 
     fun dispose() {
@@ -487,6 +1073,9 @@ class ConnectionManager(context: Context) {
 
     private fun findAvailableRoom(
         uid: String,
+        maxCapacity: Int,
+        password: String,
+        permissionMode: RoomPermissionMode,
         attemptsLeft: Int
     ) {
         if (attemptsLeft <= 0) {
@@ -501,19 +1090,42 @@ class ConnectionManager(context: Context) {
         roomReference.get()
             .addOnSuccessListener { snapshot ->
                 if (snapshot.exists()) {
-                    findAvailableRoom(uid, attemptsLeft - 1)
+                    findAvailableRoom(
+                        uid, maxCapacity, password,
+                        permissionMode, attemptsLeft - 1
+                    )
                     return@addOnSuccessListener
                 }
 
-                val info = mapOf(
+                val passwordHash = if (password.isNotBlank()) {
+                    hashPassword(password)
+                } else {
+                    ""
+                }
+
+                val info = mutableMapOf<String, Any>(
                     "createdBy" to uid,
-                    "createdAt" to System.currentTimeMillis()
+                    "createdAt" to System.currentTimeMillis(),
+                    "maxCapacity" to maxCapacity,
+                    "permissionMode" to permissionMode.name.lowercase(),
+                    "adminUid" to uid
                 )
+                if (passwordHash.isNotBlank()) {
+                    info["passwordHash"] = passwordHash
+                }
 
                 roomReference.child("info")
                     .setValue(info)
                     .addOnSuccessListener {
-                        registerDevice(code, uid)
+                        registerDevice(
+                            code = code,
+                            uid = uid,
+                            maxCapacity = maxCapacity,
+                            role = RoomRole.ADMIN,
+                            permissionMode = permissionMode,
+                            adminUidValue = uid,
+                            hasPassword = passwordHash.isNotBlank()
+                        )
                     }
                     .addOnFailureListener { error ->
                         isBusy = false
@@ -530,7 +1142,12 @@ class ConnectionManager(context: Context) {
 
     private fun registerDevice(
         code: String,
-        uid: String
+        uid: String,
+        maxCapacity: Int = DEFAULT_CAPACITY,
+        role: RoomRole = RoomRole.MEMBER,
+        permissionMode: RoomPermissionMode = RoomPermissionMode.OPEN,
+        adminUidValue: String? = null,
+        hasPassword: Boolean = false
     ) {
         val deviceReference = database
             .child("rooms")
@@ -538,33 +1155,69 @@ class ConnectionManager(context: Context) {
             .child("devices")
             .child(uid)
 
-        val deviceData = mapOf(
-            "name" to getDeviceName(),
-            "joinedAt" to System.currentTimeMillis()
-        )
+        // Если устройство уже было в комнате — сохраняем прежнюю роль
+        deviceReference.get().addOnSuccessListener { existing ->
+            val existingRole = if (existing.exists()) {
+                RoomRole.fromString(
+                    existing.child("role").getValue(String::class.java)
+                )
+            } else {
+                role
+            }
 
-        deviceReference.onDisconnect()
-            .removeValue()
-            .addOnSuccessListener {
-                deviceReference.setValue(deviceData)
-                    .addOnSuccessListener {
-                        currentRoomCode = code
-                        isBusy = false
-                        statusMessage = "Вы подключены к комнате $code."
-                        observeRoom(code)
-                    }
-                    .addOnFailureListener { error ->
-                        isBusy = false
-                        statusMessage =
-                            "Не удалось подключить устройство: " +
-                                    error.message
-                    }
+            // Создатель всегда админ при создании; при rejoin берём stored
+            val finalRole = when {
+                role == RoomRole.ADMIN -> RoomRole.ADMIN
+                existing.exists() -> existingRole
+                else -> RoomRole.MEMBER
             }
-            .addOnFailureListener { error ->
-                isBusy = false
-                statusMessage =
-                    "Ошибка настройки соединения: ${error.message}"
-            }
+
+            val deviceData = mapOf(
+                "name" to getDeviceName(),
+                "joinedAt" to System.currentTimeMillis(),
+                "role" to finalRole.name
+            )
+
+            deviceReference.onDisconnect()
+                .removeValue()
+                .addOnSuccessListener {
+                    deviceReference.setValue(deviceData)
+                        .addOnSuccessListener {
+                            currentRoomCode = code
+                            roomCapacity = maxCapacity
+                            this.permissionMode = permissionMode
+                            this.myRole = finalRole
+                            this.adminUid = adminUidValue
+                            this.roomHasPassword = hasPassword
+                            isBusy = false
+                            statusMessage =
+                                "Вы подключены к комнате $code " +
+                                        "(${finalRole.name}, " +
+                                        "вместимость $maxCapacity)."
+                            observeRoom(code)
+                            worker.execute {
+                                try {
+                                    transferClient.cleanup()
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                        .addOnFailureListener { error ->
+                            isBusy = false
+                            statusMessage =
+                                "Не удалось подключить устройство: " +
+                                        error.message
+                        }
+                }
+                .addOnFailureListener { error ->
+                    isBusy = false
+                    statusMessage =
+                        "Ошибка настройки соединения: ${error.message}"
+                }
+        }.addOnFailureListener { error ->
+            isBusy = false
+            statusMessage = "Ошибка чтения устройства: ${error.message}"
+        }
     }
 
     private fun observeRoom(code: String) {
@@ -579,6 +1232,8 @@ class ConnectionManager(context: Context) {
         devicesListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 connectedDevices.clear()
+                val myUid = auth.currentUser?.uid
+                var seenAdmin = false
 
                 for (child in snapshot.children) {
                     val id = child.key ?: continue
@@ -587,9 +1242,31 @@ class ConnectionManager(context: Context) {
                         .getValue(String::class.java)
                         ?: "Устройство"
 
-                    connectedDevices.add(
-                        RoomDevice(id, name)
+                    val role = RoomRole.fromString(
+                        child.child("role").getValue(String::class.java)
                     )
+
+                    if (role == RoomRole.ADMIN) {
+                        seenAdmin = true
+                        adminUid = id
+                    }
+
+                    if (id == myUid) {
+                        myRole = role
+                    }
+
+                    connectedDevices.add(
+                        RoomDevice(id, name, role)
+                    )
+                }
+
+                // Админ отвалился без leaveRoom — выбираем преемника
+                if (
+                    !seenAdmin &&
+                    connectedDevices.isNotEmpty() &&
+                    currentRoomCode == code
+                ) {
+                    tryElectNewAdmin(code, snapshot)
                 }
             }
 
@@ -601,7 +1278,7 @@ class ConnectionManager(context: Context) {
 
         tracksListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                roomTracks.clear()
+                val loaded = mutableListOf<Pair<Int, RoomTrack>>()
 
                 for (child in snapshot.children) {
                     val key = child.key ?: continue
@@ -626,15 +1303,38 @@ class ConnectionManager(context: Context) {
                         .getValue(String::class.java)
                         ?: ""
 
-                    roomTracks.add(
-                        RoomTrack(
+                    val transferId = child.child("transferId")
+                        .getValue(String::class.java)
+                        ?: ""
+
+                    val objectPath = child.child("objectPath")
+                        .getValue(String::class.java)
+                        ?: ""
+
+                    val order = (
+                            child.child("order").value as? Number
+                            )?.toInt()
+                        ?: (
+                                child.child("addedAt").value as? Number
+                                )?.toInt()
+                        ?: 0
+
+                    loaded.add(
+                        order to RoomTrack(
                             id = songId,
                             title = title,
                             downloadUrl = url,
                             addedBy = addedBy,
-                            fileName = fileName
+                            fileName = fileName,
+                            transferId = transferId,
+                            objectPath = objectPath
                         )
                     )
+                }
+
+                roomTracks.clear()
+                loaded.sortedBy { it.first }.forEach {
+                    roomTracks.add(it.second)
                 }
             }
 
@@ -710,6 +1410,34 @@ class ConnectionManager(context: Context) {
                     "Ошибка синхронизации плеера: ${error.message}"
             }
         }
+
+        // Следим за info (режим прав, adminUid)
+        roomReference.child("info")
+            .addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    if (currentRoomCode != code) return
+
+                    permissionMode = RoomPermissionMode.fromString(
+                        snapshot.child("permissionMode")
+                            .getValue(String::class.java)
+                    )
+                    adminUid = snapshot.child("adminUid")
+                        .getValue(String::class.java)
+                    val hash = snapshot.child("passwordHash")
+                        .getValue(String::class.java)
+                        .orEmpty()
+                    roomHasPassword = hash.isNotBlank()
+
+                    val capacity = (
+                            snapshot.child("maxCapacity").value as? Number
+                            )?.toInt()
+                    if (capacity != null) {
+                        roomCapacity = capacity
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            })
 
         devicesReference?.addValueEventListener(devicesListener!!)
         tracksReference?.addValueEventListener(tracksListener!!)
@@ -811,6 +1539,109 @@ class ConnectionManager(context: Context) {
         } finally {
             cursor?.close()
         }
+    }
+
+    /**
+     * Если админ исчез из devices, любой клиент пытается
+     * атомарно выбрать преемника (модератор → иначе любой).
+     */
+    private fun tryElectNewAdmin(code: String, devicesSnap: DataSnapshot) {
+        val roomRef = database.child("rooms").child(code)
+        val infoRef = roomRef.child("info")
+
+        infoRef.runTransaction(object :
+            com.google.firebase.database.Transaction.Handler {
+
+            override fun doTransaction(
+                currentData: com.google.firebase.database.MutableData
+            ): com.google.firebase.database.Transaction.Result {
+                val currentAdmin = currentData.child("adminUid")
+                    .getValue(String::class.java)
+
+                // Если админ всё ещё «числится» и он в devices — ничего не делаем.
+                // Если adminUid указывает на отсутствующего — переназначаем.
+                val adminStillPresent = currentAdmin != null &&
+                        devicesSnap.child(currentAdmin).exists()
+
+                if (adminStillPresent) {
+                    return com.google.firebase.database.Transaction.success(
+                        currentData
+                    )
+                }
+
+                val mods = mutableListOf<String>()
+                val all = mutableListOf<String>()
+                for (child in devicesSnap.children) {
+                    val id = child.key ?: continue
+                    all.add(id)
+                    val role = RoomRole.fromString(
+                        child.child("role").getValue(String::class.java)
+                    )
+                    if (role == RoomRole.MODERATOR) {
+                        mods.add(id)
+                    }
+                }
+
+                if (all.isEmpty()) {
+                    return com.google.firebase.database.Transaction.success(
+                        currentData
+                    )
+                }
+
+                val successor = if (mods.isNotEmpty()) {
+                    mods[random.nextInt(mods.size)]
+                } else {
+                    all[random.nextInt(all.size)]
+                }
+
+                currentData.child("adminUid").value = successor
+                return com.google.firebase.database.Transaction.success(
+                    currentData
+                )
+            }
+
+            override fun onComplete(
+                error: DatabaseError?,
+                committed: Boolean,
+                currentData: DataSnapshot?
+            ) {
+                if (!committed || error != null) return
+
+                val newAdmin = currentData
+                    ?.child("adminUid")
+                    ?.getValue(String::class.java)
+                    ?: return
+
+                // Выставляем роль ADMIN преемнику
+                roomRef.child("devices")
+                    .child(newAdmin)
+                    .child("role")
+                    .setValue(RoomRole.ADMIN.name)
+
+                // Снимаем ADMIN с остальных (на всякий случай)
+                for (child in devicesSnap.children) {
+                    val id = child.key ?: continue
+                    if (id == newAdmin) continue
+                    val role = RoomRole.fromString(
+                        child.child("role").getValue(String::class.java)
+                    )
+                    if (role == RoomRole.ADMIN) {
+                        roomRef.child("devices")
+                            .child(id)
+                            .child("role")
+                            .setValue(RoomRole.MEMBER.name)
+                    }
+                }
+            }
+        })
+    }
+
+    private fun hashPassword(password: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bytes = digest.digest(
+            password.trim().toByteArray(Charsets.UTF_8)
+        )
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     private fun generateRoomCode(): String {

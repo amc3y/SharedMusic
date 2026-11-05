@@ -1,6 +1,7 @@
 package com.example.sharedmusic.connection
 
 import android.net.Uri
+import com.example.sharedmusic.transfer.UploadResult
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,13 +19,12 @@ import java.util.concurrent.TimeUnit
 class FileUploader {
 
     companion object {
-        // ЗАМЕНИ ЭТИ ДВЕ СТРОКИ ДАННЫМИ СВОЕГО ПРОЕКТА
+        // ЗАМЕНИ ЭТИ ДВЕ СТРОКИ ДАННЫМИ СВОЕГО ПРОЕКТА (если отличаются)
         private const val SUPABASE_URL =
             "https://bihtoksworbnnisknylr.supabase.co"
 
         private const val SUPABASE_PUBLISHABLE_KEY =
             "sb_publishable_VJInQq_aGBeGpidzB68t3w_PyJ8Bepw"
-
 
         private const val BUCKET_NAME = "shared-music"
 
@@ -41,13 +41,13 @@ class FileUploader {
 
     /**
      * Загружает музыкальный файл в Supabase Storage
-     * и возвращает публичную ссылку для скачивания.
+     * и возвращает публичную ссылку + object_path для регистрации передачи.
      */
     fun upload(
         file: File,
         remoteFileName: String = file.name,
         onProgress: (Long, Long) -> Unit = { _, _ -> }
-    ): String {
+    ): UploadResult {
         checkConfiguration()
 
         if (!file.exists() || !file.isFile) {
@@ -70,7 +70,6 @@ class FileUploader {
 
         val baseUrl = SUPABASE_URL.trimEnd('/')
 
-        // Endpoint загрузки, НЕ публичный URL скачивания.
         val uploadUrl =
             "$baseUrl/storage/v1/object/" +
                     "$BUCKET_NAME/$encodedObjectName"
@@ -84,6 +83,7 @@ class FileUploader {
         val request = Request.Builder()
             .url(uploadUrl)
             .header("apikey", SUPABASE_PUBLISHABLE_KEY)
+            .header("Authorization", "Bearer $SUPABASE_PUBLISHABLE_KEY")
             .header("x-upsert", "false")
             .post(fileBody)
             .build()
@@ -98,9 +98,15 @@ class FileUploader {
             }
         }
 
-        // Для публичного bucket скачивание доступно по этой ссылке.
-        return "$baseUrl/storage/v1/object/public/" +
-                "$BUCKET_NAME/$encodedObjectName"
+        val downloadUrl =
+            "$baseUrl/storage/v1/object/public/" +
+                    "$BUCKET_NAME/$encodedObjectName"
+
+        return UploadResult(
+            downloadUrl = downloadUrl,
+            objectPath = objectName,
+            fileName = safeName
+        )
     }
 
     /**

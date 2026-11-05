@@ -21,22 +21,28 @@ fun MainScreen(
     onOpenLibraryClick: () -> Unit,
     onOpenConnectionClick: () -> Unit
 ) {
+    // Можно выбрать несколько файлов сразу
     val musicPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        uri?.let { viewModel.addSong(it) }
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            viewModel.addSongs(uris)
+        }
     }
 
     val isPlaying by viewModel.isPlaying.collectAsState()
     val currentSong by viewModel.currentSong.collectAsState()
+    val songs by viewModel.songs.collectAsState()
 
     Column {
         Button(onClick = { musicPicker.launch("audio/*") }) {
-            Text("Добавить музыку")
+            Text("Добавить музыку (можно несколько)")
         }
 
+        Text("В библиотеке: ${songs.size}")
+
         Button(onClick = { viewModel.toggleMusic() }) {
-            Text(if (isPlaying) "Стоп" else "Послушать")
+            Text(if (isPlaying) "Пауза" else "Послушать")
         }
 
         if (currentSong != null) {

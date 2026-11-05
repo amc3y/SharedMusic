@@ -72,6 +72,28 @@ fun AppNavigation() {
             )
         }
 
+        // Автопереход к следующему треку плейлиста комнаты
+        musicViewModel.setOnTrackEnded { ended ->
+            if (connectionManager.currentRoomCode == null) return@setOnTrackEnded
+            if (!connectionManager.canControlPlayback()) return@setOnTrackEnded
+
+            val localSongs = musicViewModel.songs.value
+            val playlist = connectionManager.roomTracks.mapNotNull { track ->
+                localSongs.firstOrNull {
+                    it.id == track.id ||
+                            it.title.trim().equals(
+                                track.title.trim(),
+                                ignoreCase = true
+                            )
+                }
+            }
+            if (playlist.isEmpty()) return@setOnTrackEnded
+
+            val next = musicViewModel.nextSongAfter(ended.id, playlist)
+                ?: return@setOnTrackEnded
+            musicViewModel.playSong(next)
+        }
+
         connectionManager.setPlaybackListener { command ->
 
             latestRemoteCommand.set(command)
@@ -158,6 +180,7 @@ fun AppNavigation() {
 
         onDispose {
             musicViewModel.setPlaybackPublisher(null)
+            musicViewModel.setOnTrackEnded(null)
             connectionManager.setPlaybackListener(null)
             connectionManager.dispose()
         }
@@ -220,6 +243,9 @@ fun AppNavigation() {
                                 title = title,
                                 songId = songId
                             )
+                        },
+                        onPlayRoomTrack = { song ->
+                            musicViewModel.playSong(song)
                         },
                         onBack = {
                             // Возвращаемся, не выходя из комнаты.
