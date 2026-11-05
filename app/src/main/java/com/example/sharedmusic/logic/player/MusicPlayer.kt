@@ -1,4 +1,4 @@
-package com.example.sharedmusic.player
+package com.example.sharedmusic.logic.player
 
 import android.content.Context
 import android.net.Uri

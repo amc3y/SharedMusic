@@ -1,7 +1,7 @@
-package com.example.sharedmusic.connection
+package com.example.sharedmusic.logic.transfer
 
 import android.net.Uri
-import com.example.sharedmusic.transfer.UploadResult
+import com.example.sharedmusic.logic.transfer.UploadResult
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -16,7 +16,7 @@ import java.net.URLConnection
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class FileUploader {
+class SupabaseStorage {
 
     companion object {
         // ЗАМЕНИ ЭТИ ДВЕ СТРОКИ ДАННЫМИ СВОЕГО ПРОЕКТА (если отличаются)
@@ -246,7 +246,7 @@ class FileUploader {
             SUPABASE_PUBLISHABLE_KEY.isBlank()
         ) {
             throw IOException(
-                "Укажи Project URL и Publishable key в FileUploader.kt"
+                "Укажи Project URL и Publishable key в SupabaseStorage.kt"
             )
         }
     }

@@ -1,4 +1,4 @@
-package com.example.sharedmusic.ui
+package com.example.sharedmusic.design.navigation
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,16 +20,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.sharedmusic.connection.ConnectionManager
-import com.example.sharedmusic.connection.RemotePlaybackCommand
-import com.example.sharedmusic.viewmodel.MusicViewModel
+import com.example.sharedmusic.design.screens.HomeScreen
+import com.example.sharedmusic.design.screens.LibraryScreen
+import com.example.sharedmusic.design.screens.RoomScreen
+import com.example.sharedmusic.logic.model.RemotePlaybackCommand
+import com.example.sharedmusic.logic.room.RoomController
+import com.example.sharedmusic.logic.viewmodel.MusicViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -49,7 +52,7 @@ fun AppNavigation() {
 
     // Менеджер не пересоздаётся при переходе между экранами.
     val connectionManager = remember(context) {
-        ConnectionManager(context.applicationContext)
+        RoomController(context.applicationContext)
     }
 
     val remoteScope = rememberCoroutineScope()
@@ -187,7 +190,7 @@ fun AppNavigation() {
     }
 
     // Раз в 3 секунды отправляем контрольную позицию.
-    // ConnectionManager сам проверяет, какое устройство является ведущим.
+    // RoomController сам проверяет, какое устройство является ведущим.
     LaunchedEffect(connectionManager, musicViewModel) {
         while (true) {
             delay(3_000L)
@@ -214,7 +217,7 @@ fun AppNavigation() {
         ) {
             when (currentScreen) {
                 "main" -> {
-                    MainScreen(
+                    HomeScreen(
                         onOpenLibraryClick = {
                             currentScreen = "library"
                         },
@@ -225,7 +228,7 @@ fun AppNavigation() {
                 }
 
                 "library" -> {
-                    SongListScreen(
+                    LibraryScreen(
                         viewModel = musicViewModel,
                         onBackClick = {
                             currentScreen = "main"
@@ -234,7 +237,7 @@ fun AppNavigation() {
                 }
 
                 "connection" -> {
-                    ConnectionScreen(
+                    RoomScreen(
                         connectionManager = connectionManager,
                         localSongs = localSongs,
                         onAddSongFromFile = { file, songId, title ->

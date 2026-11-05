@@ -1,14 +1,14 @@
-package com.example.sharedmusic.viewmodel
+package com.example.sharedmusic.logic.viewmodel
 
 import android.app.Application
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
-import com.example.sharedmusic.connection.RemotePlaybackCommand
-import com.example.sharedmusic.data.SongLibrary
-import com.example.sharedmusic.model.Song
-import com.example.sharedmusic.player.MusicPlayer
+import com.example.sharedmusic.logic.model.RemotePlaybackCommand
+import com.example.sharedmusic.logic.library.SongLibrary
+import com.example.sharedmusic.logic.model.Song
+import com.example.sharedmusic.logic.player.MusicPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
@@ -39,7 +39,6 @@ class MusicViewModel(
     private var playbackPublisher:
             ((Song, Long, Boolean) -> Unit)? = null
 
-    /** Вызывается один раз, когда текущий трек закончился. */
     private var onTrackEnded: ((Song) -> Unit)? = null
     private var endEventConsumed = false
 
@@ -87,15 +86,10 @@ class MusicViewModel(
         onTrackEnded = listener
     }
 
-    /**
-     * Добавляет песню из системного выбора файла.
-     * Файл копируется во внутреннее хранилище приложения.
-     */
     fun addSong(uri: Uri) {
         addSongs(listOf(uri))
     }
 
-    /** Добавляет сразу несколько файлов в локальную библиотеку. */
     fun addSongs(uris: List<Uri>) {
         if (uris.isEmpty()) return
 
@@ -123,10 +117,6 @@ class MusicViewModel(
         }
     }
 
-    /**
-     * Добавляет песню после скачивания из комнаты.
-     * Копирует в library/, чтобы файл не пропал при очистке room_tracks.
-     */
     fun addSongFromFile(
         file: File,
         title: String,
@@ -193,10 +183,6 @@ class MusicViewModel(
         publishCurrentPlayback()
     }
 
-    /**
-     * Возвращает следующую песню после currentId в порядке списка,
-     * либо первую, если currentId не найден / это последняя (циклично).
-     */
     fun nextSongAfter(currentId: String, playlist: List<Song>): Song? {
         if (playlist.isEmpty()) return null
         val index = playlist.indexOfFirst { it.id == currentId }

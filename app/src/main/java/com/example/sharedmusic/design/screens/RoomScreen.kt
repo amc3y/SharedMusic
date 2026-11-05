@@ -1,4 +1,4 @@
-package com.example.sharedmusic.ui
+package com.example.sharedmusic.design.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,15 +23,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.example.sharedmusic.connection.ConnectionManager
-import com.example.sharedmusic.connection.RoomPermissionMode
-import com.example.sharedmusic.connection.RoomRole
-import com.example.sharedmusic.model.Song
+import com.example.sharedmusic.logic.room.RoomController
+import com.example.sharedmusic.logic.model.RoomPermissionMode
+import com.example.sharedmusic.logic.model.RoomRole
+import com.example.sharedmusic.logic.model.Song
 import java.io.File
 
 @Composable
-fun ConnectionScreen(
-    connectionManager: ConnectionManager,
+fun RoomScreen(
+    connectionManager: RoomController,
     localSongs: List<Song>,
     onAddSongFromFile: (File, String, String) -> Unit,
     onPlayRoomTrack: (Song) -> Unit,
@@ -39,7 +39,7 @@ fun ConnectionScreen(
 ) {
     var roomCodeInput by remember { mutableStateOf("") }
     var capacityInput by remember {
-        mutableStateOf(ConnectionManager.DEFAULT_CAPACITY.toString())
+        mutableStateOf(RoomController.DEFAULT_CAPACITY.toString())
     }
     var passwordInput by remember { mutableStateOf("") }
     var joinPasswordInput by remember { mutableStateOf("") }
@@ -96,8 +96,8 @@ fun ConnectionScreen(
                 },
                 label = {
                     Text(
-                        "Вместимость (${ConnectionManager.MIN_CAPACITY}–" +
-                                "${ConnectionManager.MAX_CAPACITY})"
+                        "Вместимость (${RoomController.MIN_CAPACITY}–" +
+                                "${RoomController.MAX_CAPACITY})"
                     )
                 },
                 singleLine = true,
@@ -162,7 +162,7 @@ fun ConnectionScreen(
                 enabled = !connectionManager.isBusy,
                 onClick = {
                     val capacity = capacityInput.toIntOrNull()
-                        ?: ConnectionManager.DEFAULT_CAPACITY
+                        ?: RoomController.DEFAULT_CAPACITY
                     val seed = localSongs.filter { it.id in selectedSeedIds }
 
                     connectionManager.createRoom(
@@ -181,7 +181,7 @@ fun ConnectionScreen(
                     // планируем отправку, когда комната станет активной.
                     // Здесь: если seed не пуст, после createRoom isBusy
                     // сбросится — пользователь увидит кнопку ниже.
-                    // Автозагрузка сида: ConnectionManager.createRoom
+                    // Автозагрузка сида: RoomController.createRoom
                     // не принимает songs, поэтому делаем отложенную отправку
                     // через remember flag.
                     if (seed.isNotEmpty()) {
@@ -443,7 +443,7 @@ fun ConnectionScreen(
  */
 @Composable
 private fun PendingSeedUploader(
-    connectionManager: ConnectionManager,
+    connectionManager: RoomController,
     seedSongs: List<Song>
 ) {
     var uploadedForCode by remember { mutableStateOf<String?>(null) }

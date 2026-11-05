@@ -1,4 +1,4 @@
-package com.example.sharedmusic.ui
+package com.example.sharedmusic.design.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -19,10 +19,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.sharedmusic.viewmodel.MusicViewModel
+import com.example.sharedmusic.logic.viewmodel.MusicViewModel
 
 @Composable
-fun SongListScreen(
+fun LibraryScreen(
     viewModel: MusicViewModel = viewModel(),
     onBackClick: () -> Unit
 ) {

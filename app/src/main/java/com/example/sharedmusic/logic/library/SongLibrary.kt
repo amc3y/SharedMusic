@@ -1,9 +1,9 @@
-package com.example.sharedmusic.data
+package com.example.sharedmusic.logic.library
 
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
-import com.example.sharedmusic.model.Song
+import com.example.sharedmusic.logic.model.Song
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File

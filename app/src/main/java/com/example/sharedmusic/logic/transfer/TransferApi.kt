@@ -1,4 +1,4 @@
-package com.example.sharedmusic.transfer
+package com.example.sharedmusic.logic.transfer
 
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -13,10 +13,10 @@ import java.util.concurrent.TimeUnit
  * Клиент Edge Function manage-transfer.
  * Использует только publishable/anon ключ — service_role остаётся на сервере.
  */
-class TransferClient {
+class TransferApi {
 
     companion object {
-        // Те же значения, что в FileUploader
+        // Те же значения, что в SupabaseStorage
         private const val SUPABASE_URL =
             "https://bihtoksworbnnisknylr.supabase.co"
 

@@ -1,4 +1,4 @@
-package com.example.sharedmusic.ui
+package com.example.sharedmusic.design.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,10 +13,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.sharedmusic.viewmodel.MusicViewModel
+import com.example.sharedmusic.logic.viewmodel.MusicViewModel
 
 @Composable
-fun MainScreen(
+fun HomeScreen(
     viewModel: MusicViewModel = viewModel(),
     onOpenLibraryClick: () -> Unit,
     onOpenConnectionClick: () -> Unit

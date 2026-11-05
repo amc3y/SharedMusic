@@ -1,4 +1,4 @@
-package com.example.sharedmusic.transfer
+package com.example.sharedmusic.logic.transfer
 
 /**
  * Результат загрузки файла в Supabase Storage.

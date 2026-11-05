@@ -1,4 +1,4 @@
-package com.example.sharedmusic.model
+package com.example.sharedmusic.logic.model
 
 import android.net.Uri
 
