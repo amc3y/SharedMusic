@@ -177,7 +177,8 @@ class RoomController(context: Context) {
             code.length != FirebaseConfig.ROOM_CODE_LENGTH ||
             code.any { it !in FirebaseConfig.ROOM_CHARACTERS }
         ) {
-            statusMessage = "Введите корректный код из 4 символов."
+            statusMessage =
+                "Введите корректный код из ${FirebaseConfig.ROOM_CODE_LENGTH} символов."
             return
         }
 

@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.example.sharedmusic.logic.core.FirebaseConfig
 import com.example.sharedmusic.logic.room.RoomController
 import com.example.sharedmusic.logic.model.RoomPermissionMode
 import com.example.sharedmusic.logic.model.RoomRole
@@ -212,8 +213,8 @@ fun RoomScreen(
                 value = roomCodeInput,
                 onValueChange = { value ->
                     roomCodeInput = value.uppercase().filter {
-                        it in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-                    }.take(4)
+                        it in FirebaseConfig.ROOM_CHARACTERS
+                    }.take(FirebaseConfig.ROOM_CODE_LENGTH)
                 },
                 label = { Text("Код комнаты") },
                 singleLine = true,
@@ -232,7 +233,7 @@ fun RoomScreen(
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !connectionManager.isBusy &&
-                        roomCodeInput.length == 4,
+                        roomCodeInput.length == FirebaseConfig.ROOM_CODE_LENGTH,
                 onClick = {
                     connectionManager.joinRoom(
                         roomCodeInput,
